@@ -1,0 +1,1556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRON Lightcycle</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+  canvas { display: block; }
+  #hud {
+    position: absolute; top: 20px; left: 20px;
+    color: #0ff; font-size: 18px; text-shadow: 0 0 10px #0ff;
+  }
+  #overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.85); color: #0ff; z-index: 10;
+  }
+  #overlay h1 {
+    font-size: 72px; text-shadow: 0 0 30px #0ff, 0 0 60px #0ff;
+    margin-bottom: 20px; letter-spacing: 15px;
+  }
+  #overlay p { font-size: 20px; margin: 8px 0; color: #8ff; }
+  #overlay .start-hint {
+    margin-top: 30px; font-size: 24px; color: #fff;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+  #game-over {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.85); z-index: 10;
+  }
+  #game-over h1 { font-size: 60px; margin-bottom: 20px; letter-spacing: 10px; }
+  #game-over p { font-size: 22px; color: #8ff; margin: 8px 0; }
+  #game-over .start-hint {
+    margin-top: 30px; font-size: 24px; color: #fff;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  #minimap {
+    position: absolute; bottom: 20px; right: 20px;
+    border: 1px solid #0ff; box-shadow: 0 0 10px #0ff;
+  }
+  #speed-bar-container {
+    position: absolute; bottom: 20px; left: 20px;
+    width: 200px; height: 12px; border: 1px solid #0ff;
+    box-shadow: 0 0 8px #0ff;
+  }
+  #speed-bar {
+    height: 100%; width: 50%; background: #0ff;
+    box-shadow: 0 0 10px #0ff; transition: width 0.1s;
+  }
+  #speed-label {
+    position: absolute; bottom: 36px; left: 20px;
+    color: #0ff; font-size: 14px; text-shadow: 0 0 8px #0ff;
+    font-family: 'Courier New', monospace;
+  }
+</style>
+</head>
+<body>
+
+<div id="overlay">
+  <h1>LIGHTCYCLE</h1>
+  <p>A / D or Arrow Keys to turn</p>
+  <p>W / S or Up / Down to change speed</p>
+  <p>Leave a trail of light. Don't crash.</p>
+  <p class="start-hint">Press SPACE to start</p>
+</div>
+
+<div id="game-over">
+  <h1 id="result-text">DEREZZED</h1>
+  <p id="result-detail"></p>
+  <p class="start-hint">Press SPACE to restart</p>
+</div>
+
+<div id="hud">
+  <div id="score">SCORE: 0</div>
+</div>
+
+<canvas id="minimap" width="180" height="180"></canvas>
+<div id="speed-label">SPEED</div>
+<div id="speed-bar-container"><div id="speed-bar"></div></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+// --- Constants ---
+const ARENA_SIZE = 300;
+const HALF_ARENA = ARENA_SIZE / 2;
+const WALL_HEIGHT = 4;
+const TRAIL_WIDTH = 0.6;
+const MIN_SPEED = 20;
+const MAX_SPEED = 60;
+const TURN_SPEED = Math.PI; // 90 degree turn over ~0.5s — but we do instant turns
+const PLAYER_COLOR = 0x00ffff;
+const AI_COLOR = 0xff6600;
+const GRID_COLOR = 0x003333;
+const TRAIL_SEGMENT_MIN = 0.5;
+
+// --- Game State ---
+let gameState = 'menu'; // menu, playing, exploding, gameover
+let score = 0;
+let gameTime = 0;
+let gameOverTimer = 0;
+let gameOverScore = 0;
+let synthFadeTimer = 0;
+const SYNTH_FADE_DURATION = 5.0;
+
+// --- Audio ---
+let audioCtx = null;
+
+function updateAudioListener() {
+  if (!audioCtx) return;
+  const l = audioCtx.listener;
+  const t = audioCtx.currentTime;
+  if (l.positionX) {
+    l.positionX.setValueAtTime(camera.position.x, t);
+    l.positionY.setValueAtTime(camera.position.y, t);
+    l.positionZ.setValueAtTime(camera.position.z, t);
+  } else {
+    l.setPosition(camera.position.x, camera.position.y, camera.position.z);
+  }
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+  if (l.forwardX) {
+    l.forwardX.setValueAtTime(fwd.x, t);
+    l.forwardY.setValueAtTime(fwd.y, t);
+    l.forwardZ.setValueAtTime(fwd.z, t);
+    l.upX.setValueAtTime(up.x, t);
+    l.upY.setValueAtTime(up.y, t);
+    l.upZ.setValueAtTime(up.z, t);
+  } else {
+    l.setOrientation(fwd.x, fwd.y, fwd.z, up.x, up.y, up.z);
+  }
+}
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+// --- Trail Synth ---
+// Each cycle gets a synth whose chord is derived from its trail geometry.
+// Pentatonic scale degrees mapped from segment lengths.
+// Turn directions shift between waveforms.
+// Current segment length modulates filter. Spatialized for the AI.
+const PENTATONIC = [1, 9/8, 5/4, 3/2, 5/3]; // C pentatonic ratios
+
+class TrailSynth {
+  constructor(baseNote, isPlayer) {
+    this.baseNote = baseNote; // e.g. 65 Hz for player, 55 Hz for AI
+    this.isPlayer = isPlayer;
+    this.voices = []; // { osc, gain }
+    this.masterGain = null;
+    this.filter = null;
+    this.panner = null;
+    this.maxVoices = 6;
+    this.alive = true;
+  }
+
+  init() {
+    if (!audioCtx) return;
+    this.filter = audioCtx.createBiquadFilter();
+    this.filter.type = 'lowpass';
+    this.filter.frequency.value = 400;
+    this.filter.Q.value = 4;
+
+    this.masterGain = audioCtx.createGain();
+    this.masterGain.gain.value = 0;
+
+    if (!this.isPlayer) {
+      // AI sound is spatialized
+      this.panner = audioCtx.createPanner();
+      this.panner.panningModel = 'HRTF';
+      this.panner.distanceModel = 'inverse';
+      this.panner.refDistance = 10;
+      this.panner.maxDistance = 200;
+      this.panner.rolloffFactor = 1;
+      this.filter.connect(this.masterGain);
+      this.masterGain.connect(this.panner);
+      this.panner.connect(audioCtx.destination);
+    } else {
+      this.filter.connect(this.masterGain);
+      this.masterGain.connect(audioCtx.destination);
+    }
+  }
+
+  // Rebuild the chord from the trail's segments
+  rebuildFromTrail(trail) {
+    if (!audioCtx || !this.masterGain) return;
+
+    // Kill old voices
+    for (const v of this.voices) {
+      v.osc.stop();
+      v.osc.disconnect();
+      v.gain.disconnect();
+    }
+    this.voices = [];
+
+    const segs = trail.segments;
+    if (segs.length === 0) {
+      // Just a base drone
+      this._addVoice(this.baseNote, 'sawtooth', 1.0);
+      return;
+    }
+
+    // Use last N segments to build chord
+    const recent = segs.slice(-this.maxVoices);
+    const waveforms = ['sawtooth', 'triangle', 'square', 'sine'];
+
+    recent.forEach((seg, i) => {
+      const dx = seg.end.x - seg.start.x;
+      const dz = seg.end.z - seg.start.z;
+      const len = Math.sqrt(dx * dx + dz * dz);
+
+      // Map segment length to pentatonic scale degree
+      // Short segments = higher notes, long = lower
+      const normLen = Math.min(len, 100) / 100; // 0..1
+      const octave = 1 + Math.floor((1 - normLen) * 3); // octaves 1-3
+      const degree = Math.floor(normLen * 37) % PENTATONIC.length;
+      const freq = this.baseNote * PENTATONIC[degree] * octave;
+
+      // Determine turn direction to pick waveform
+      // Use segment index to vary
+      const wave = waveforms[i % waveforms.length];
+
+      // Louder for more recent segments
+      const vol = 0.4 + (i / recent.length) * 0.6;
+      this._addVoice(freq, wave, vol);
+    });
+  }
+
+  _addVoice(freq, wave, vol) {
+    const osc = audioCtx.createOscillator();
+    osc.type = wave;
+    osc.frequency.value = freq;
+    // Slight random detune for richness
+    osc.detune.value = (Math.random() - 0.5) * 15;
+
+    const gain = audioCtx.createGain();
+    gain.gain.value = vol;
+
+    osc.connect(gain);
+    gain.connect(this.filter);
+    osc.start();
+
+    this.voices.push({ osc, gain, baseVol: vol });
+  }
+
+  // Called each frame — modulate filter from current segment length and speed
+  update(cycle) {
+    if (!audioCtx || !this.masterGain) return;
+
+    if (!cycle.alive) {
+      this.masterGain.gain.value *= 0.9; // fade out
+      return;
+    }
+
+    // Current growing segment length modulates filter cutoff
+    const trail = cycle.trail;
+    let curLen = 0;
+    if (trail.currentStart) {
+      const dx = cycle.x - trail.currentStart.x;
+      const dz = cycle.z - trail.currentStart.z;
+      curLen = Math.sqrt(dx * dx + dz * dz);
+    }
+    // Filter opens as current segment grows, resets on turn
+    const lenFactor = Math.min(curLen, 80) / 80;
+    this.filter.frequency.value = 200 + lenFactor * 800;
+
+    // Speed modulates resonance
+    const speedT = (cycle.speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
+    this.filter.Q.value = 2 + speedT * 8;
+
+    // Master volume
+    const baseVol = this.isPlayer ? 0.06 : 0.08;
+    this.masterGain.gain.value = baseVol + speedT * 0.03;
+
+    // Spatialized AI position
+    if (this.panner) {
+      this.panner.setPosition(cycle.x, 1, cycle.z);
+    }
+  }
+
+  // Bypass the panner so the synth plays at full volume regardless of position
+  bypass3D() {
+    if (this.panner && this.masterGain) {
+      this.masterGain.disconnect();
+      this.masterGain.connect(audioCtx.destination);
+    }
+  }
+
+  stop() {
+    if (this.masterGain) this.masterGain.gain.value = 0;
+  }
+
+  dispose() {
+    for (const v of this.voices) {
+      v.osc.stop();
+      v.osc.disconnect();
+      v.gain.disconnect();
+    }
+    this.voices = [];
+    if (this.masterGain) this.masterGain.disconnect();
+    if (this.filter) this.filter.disconnect();
+    if (this.panner) this.panner.disconnect();
+    this.masterGain = null;
+    this.filter = null;
+    this.panner = null;
+  }
+}
+
+let playerSynth = null;
+let aiSynth = null;
+
+function initTrailSynths() {
+  if (playerSynth) playerSynth.dispose();
+  if (aiSynth) aiSynth.dispose();
+  playerSynth = new TrailSynth(65, true);
+  aiSynth = new TrailSynth(55, false);
+  playerSynth.init();
+  aiSynth.init();
+  // Start with base drone
+  playerSynth.rebuildFromTrail({ segments: [] });
+  aiSynth.rebuildFromTrail({ segments: [] });
+}
+
+function stopTrailSynths() {
+  if (playerSynth) playerSynth.stop();
+  if (aiSynth) aiSynth.stop();
+}
+
+function playTurnSound(synth, dir) {
+  if (!audioCtx || !synth || synth.voices.length === 0) return;
+  const now = audioCtx.currentTime;
+  // Bend is up for right turn, down for left
+  const bendCents = dir * 400;
+  for (const v of synth.voices) {
+    v.osc.detune.cancelScheduledValues(now);
+    v.osc.detune.setValueAtTime(bendCents, now);
+    v.osc.detune.linearRampToValueAtTime((Math.random() - 0.5) * 15, now + 0.15);
+  }
+  // Brief filter spike
+  synth.filter.frequency.cancelScheduledValues(now);
+  const curFilter = synth.filter.frequency.value;
+  synth.filter.frequency.setValueAtTime(curFilter + 800, now);
+  synth.filter.frequency.linearRampToValueAtTime(curFilter, now + 0.15);
+}
+
+function playExplosionSound(crashedSynth) {
+  if (!audioCtx) return;
+  const now = audioCtx.currentTime;
+  const duration = 1.8;
+
+  // --- Noise burst ---
+  const bufferSize = audioCtx.sampleRate * duration;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) {
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 2);
+  }
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+
+  const noiseFilter = audioCtx.createBiquadFilter();
+  noiseFilter.type = 'lowpass';
+  noiseFilter.frequency.setValueAtTime(2000, now);
+  noiseFilter.frequency.exponentialRampToValueAtTime(80, now + duration);
+
+  const noiseGain = audioCtx.createGain();
+  noiseGain.gain.setValueAtTime(0.15, now);
+  noiseGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+  noise.connect(noiseFilter);
+  noiseFilter.connect(noiseGain);
+  noiseGain.connect(audioCtx.destination);
+  noise.start();
+
+  // --- Low boom ---
+  const boom = audioCtx.createOscillator();
+  boom.type = 'sine';
+  boom.frequency.setValueAtTime(80, now);
+  boom.frequency.exponentialRampToValueAtTime(18, now + 0.7);
+  const boomGain = audioCtx.createGain();
+  boomGain.gain.setValueAtTime(0.25, now);
+  boomGain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
+  boom.connect(boomGain);
+  boomGain.connect(audioCtx.destination);
+  boom.start();
+  boom.stop(now + 0.8);
+
+  // --- Trail chord death scream ---
+  // Take the crashed cycle's current chord and pitch it down with distortion
+  if (crashedSynth && crashedSynth.voices.length > 0) {
+    // Waveshaper for distortion
+    const distortion = audioCtx.createWaveShaper();
+    const curve = new Float32Array(256);
+    for (let i = 0; i < 256; i++) {
+      const x = (i / 128) - 1;
+      curve[i] = (Math.PI + 50) * x / (Math.PI + 50 * Math.abs(x));
+    }
+    distortion.curve = curve;
+    distortion.oversample = '4x';
+
+    const deathFilter = audioCtx.createBiquadFilter();
+    deathFilter.type = 'lowpass';
+    deathFilter.frequency.setValueAtTime(3000, now);
+    deathFilter.frequency.exponentialRampToValueAtTime(60, now + duration);
+    deathFilter.Q.value = 8;
+
+    const deathGain = audioCtx.createGain();
+    deathGain.gain.setValueAtTime(0.15, now);
+    deathGain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+    distortion.connect(deathFilter);
+    deathFilter.connect(deathGain);
+    deathGain.connect(audioCtx.destination);
+
+    // Recreate each voice from the chord, pitch-diving down
+    for (const v of crashedSynth.voices) {
+      const freq = v.osc.frequency.value;
+      const wave = v.osc.type;
+
+      const osc = audioCtx.createOscillator();
+      osc.type = wave;
+      osc.frequency.setValueAtTime(freq, now);
+      // Pitch dives to ~10% of original over duration
+      osc.frequency.exponentialRampToValueAtTime(Math.max(freq * 0.08, 15), now + duration);
+      // Wild detune wobble
+      osc.detune.setValueAtTime(0, now);
+      osc.detune.linearRampToValueAtTime((Math.random() - 0.5) * 1200, now + 0.3);
+      osc.detune.linearRampToValueAtTime((Math.random() - 0.5) * 2400, now + duration);
+
+      const vGain = audioCtx.createGain();
+      vGain.gain.value = v.baseVol;
+
+      osc.connect(vGain);
+      vGain.connect(distortion);
+      osc.start();
+      osc.stop(now + duration);
+    }
+  }
+}
+
+function playStartSound() {
+  if (!audioCtx) return;
+  const notes = [330, 440, 660];
+  notes.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, audioCtx.currentTime + i * 0.1);
+    gain.gain.linearRampToValueAtTime(0.1, audioCtx.currentTime + i * 0.1 + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.1 + 0.2);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(audioCtx.currentTime + i * 0.1);
+    osc.stop(audioCtx.currentTime + i * 0.1 + 0.2);
+  });
+}
+
+let victoryNodes = []; // track active nodes for cleanup
+let victoryInterval = null;
+
+function stopVictorySound() {
+  if (victoryInterval) {
+    clearInterval(victoryInterval);
+    victoryInterval = null;
+  }
+  for (const node of victoryNodes) {
+    try { if (node.stop) node.stop(); } catch(e) {}
+    try { node.disconnect(); } catch(e) {}
+  }
+  victoryNodes = [];
+}
+
+function playVictorySound() {
+  if (!audioCtx || !player || !playerSynth) return;
+  stopVictorySound();
+
+  // Collect trail vertex points
+  const points = [];
+  const segs = player.trail.segments;
+  if (segs.length > 0) {
+    points.push(segs[0].start);
+    for (const seg of segs) points.push(seg.end);
+    points.push({ x: player.x, z: player.z });
+  }
+  if (points.length < 2 || playerSynth.voices.length === 0) return;
+
+  // Snapshot chord
+  const voiceSnapshots = playerSynth.voices.map(v => ({
+    freq: v.osc.frequency.value,
+    wave: v.osc.type,
+  }));
+
+  // x -> frequency multiplier, z -> amplitude
+  function xToMult(x) {
+    const t = (x + HALF_ARENA) / ARENA_SIZE;
+    return 0.25 + t * 3.75;
+  }
+  function zToAmp(z) {
+    const t = (z + HALF_ARENA) / ARENA_SIZE;
+    return 0.01 + t * 0.19;
+  }
+
+  // Shared output chain: filter matching trail synth
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.value = playerSynth.filter ? playerSynth.filter.frequency.value : 600;
+  filter.Q.value = playerSynth.filter ? playerSynth.filter.Q.value : 4;
+  filter.connect(audioCtx.destination);
+  victoryNodes.push(filter);
+
+  const timePerPoint = 0.15;
+  const loopDuration = (points.length - 1) * timePerPoint + 0.3;
+
+  // Arpeggio pattern derived from point count
+  // Each loop iteration staggers the voices with increasing delay
+  let loopCount = 0;
+
+  function scheduleLoop() {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const iteration = loopCount++;
+
+    // Each loop, rotate which voice leads the arpeggio
+    const arpOffset = iteration % voiceSnapshots.length;
+    // Gradually widen the arpeggio stagger over loops (0 -> 0.12s per voice)
+    const staggerTime = Math.min(0.12, iteration * 0.02);
+    // Alternate direction: up then down
+    const reverse = iteration % 2 === 1;
+
+    // Master gain for this loop — slight fade over many loops
+    const masterGain = audioCtx.createGain();
+    masterGain.gain.value = 0.12;
+    masterGain.connect(filter);
+    victoryNodes.push(masterGain);
+
+    voiceSnapshots.forEach((snap, vi) => {
+      // Arpeggio order: rotate and optionally reverse
+      let arpIndex = (vi + arpOffset) % voiceSnapshots.length;
+      if (reverse) arpIndex = voiceSnapshots.length - 1 - arpIndex;
+      const voiceDelay = arpIndex * staggerTime;
+
+      const osc = audioCtx.createOscillator();
+      osc.type = snap.wave;
+
+      // Schedule frequency sweep through trail points
+      const startTime = now + voiceDelay;
+      osc.frequency.setValueAtTime(snap.freq * xToMult(points[0].x), startTime);
+      for (let i = 1; i < points.length; i++) {
+        osc.frequency.linearRampToValueAtTime(
+          snap.freq * xToMult(points[i].x),
+          startTime + i * timePerPoint
+        );
+      }
+
+      // Per-voice envelope: fade in, sustain through melody, fade out
+      const voiceGain = audioCtx.createGain();
+      const perVoice = 1.0 / voiceSnapshots.length;
+      voiceGain.gain.setValueAtTime(0.001, startTime);
+      voiceGain.gain.linearRampToValueAtTime(perVoice, startTime + 0.05);
+      const voiceEnd = startTime + (points.length - 1) * timePerPoint;
+      voiceGain.gain.setValueAtTime(perVoice, voiceEnd);
+      voiceGain.gain.linearRampToValueAtTime(0.001, voiceEnd + 0.2);
+
+      // Amplitude envelope from z coordinates
+      const ampGain = audioCtx.createGain();
+      ampGain.gain.setValueAtTime(zToAmp(points[0].z), startTime);
+      for (let i = 1; i < points.length; i++) {
+        ampGain.gain.linearRampToValueAtTime(zToAmp(points[i].z), startTime + i * timePerPoint);
+      }
+
+      osc.connect(voiceGain);
+      voiceGain.connect(ampGain);
+      ampGain.connect(masterGain);
+
+      const stopTime = voiceEnd + 0.3;
+      osc.start(startTime);
+      osc.stop(stopTime);
+
+      victoryNodes.push(osc, voiceGain, ampGain);
+    });
+  }
+
+  // Schedule first loop immediately
+  scheduleLoop();
+
+  // Re-schedule on each loop completion
+  victoryInterval = setInterval(() => {
+    if (gameState !== 'gameover' && gameState !== 'exploding') {
+      stopVictorySound();
+      return;
+    }
+    scheduleLoop();
+  }, loopDuration * 1000);
+}
+
+// --- Renderer ---
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.prepend(renderer.domElement);
+
+// --- Scene ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000508);
+scene.fog = new THREE.Fog(0x000508, 50, 250);
+
+// --- Camera ---
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
+
+// --- Lighting ---
+const ambientLight = new THREE.AmbientLight(0x111122, 0.5);
+scene.add(ambientLight);
+
+const dirLight = new THREE.DirectionalLight(0x224466, 0.4);
+dirLight.position.set(50, 100, 50);
+scene.add(dirLight);
+
+// --- Arena Floor ---
+function createArena() {
+  const floorGeo = new THREE.PlaneGeometry(ARENA_SIZE, ARENA_SIZE);
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: 0x000a0a,
+    roughness: 0.8,
+    metalness: 0.2,
+  });
+  const floor = new THREE.Mesh(floorGeo, floorMat);
+  floor.rotation.x = -Math.PI / 2;
+  floor.position.y = 0;
+  floor.receiveShadow = true;
+  scene.add(floor);
+
+  // Grid lines
+  const gridHelper = new THREE.GridHelper(ARENA_SIZE, 60, GRID_COLOR, GRID_COLOR);
+  gridHelper.position.y = 0.01;
+  scene.add(gridHelper);
+
+  // Arena walls covered with random polygons
+  const wallHeight = 15;
+  const polyGeos = [
+    new THREE.TetrahedronGeometry(1),
+    new THREE.OctahedronGeometry(0.8),
+    new THREE.IcosahedronGeometry(0.7),
+    new THREE.DodecahedronGeometry(0.6),
+    new THREE.TetrahedronGeometry(0.5),
+    new THREE.BoxGeometry(1.2, 0.8, 0.3),
+    new THREE.ConeGeometry(0.5, 1.0, 5),
+  ];
+  const polyColors = [0x003333, 0x004444, 0x002222, 0x005555, 0x001a1a, 0x006666];
+
+  // 4 walls: along Z (front/back) and along X (left/right)
+  const walls = [
+    { axis: 'z', sign: -1, nx: 0, nz: 1 },   // -Z wall (front)
+    { axis: 'z', sign: 1, nx: 0, nz: -1 },    // +Z wall (back)
+    { axis: 'x', sign: -1, nx: 1, nz: 0 },    // -X wall (left)
+    { axis: 'x', sign: 1, nx: -1, nz: 0 },    // +X wall (right)
+  ];
+
+  walls.forEach(wall => {
+    const polyCount = 120;
+    for (let i = 0; i < polyCount; i++) {
+      const geo = polyGeos[Math.floor(Math.random() * polyGeos.length)];
+      const color = polyColors[Math.floor(Math.random() * polyColors.length)];
+      const mat = new THREE.MeshStandardMaterial({
+        color: color,
+        emissive: color,
+        emissiveIntensity: 0.3 + Math.random() * 0.4,
+        metalness: 0.6,
+        roughness: 0.3,
+        transparent: true,
+        opacity: 0.5 + Math.random() * 0.4,
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+
+      const along = (Math.random() - 0.5) * ARENA_SIZE;
+      const y = Math.random() * wallHeight;
+      const scale = 0.5 + Math.random() * 2.0;
+      mesh.scale.set(scale, scale, scale * (0.3 + Math.random() * 0.7));
+
+      if (wall.axis === 'z') {
+        mesh.position.set(along, y, wall.sign * HALF_ARENA);
+      } else {
+        mesh.position.set(wall.sign * HALF_ARENA, y, along);
+      }
+
+      mesh.rotation.set(
+        Math.random() * Math.PI * 2,
+        Math.random() * Math.PI * 2,
+        Math.random() * Math.PI * 2
+      );
+
+      scene.add(mesh);
+    }
+  });
+}
+
+// --- Lightcycle Model (simple) ---
+function createCycleModel(color) {
+  const group = new THREE.Group();
+
+  // Body
+  const bodyGeo = new THREE.BoxGeometry(0.8, 0.6, 2.5);
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0x111111,
+    emissive: color,
+    emissiveIntensity: 0.3,
+    metalness: 0.8,
+    roughness: 0.2,
+  });
+  const body = new THREE.Mesh(bodyGeo, bodyMat);
+  body.position.y = 0.7;
+  body.castShadow = true;
+  group.add(body);
+
+  // Light strip on top
+  const stripGeo = new THREE.BoxGeometry(0.2, 0.15, 2.6);
+  const stripMat = new THREE.MeshStandardMaterial({
+    color: color,
+    emissive: color,
+    emissiveIntensity: 1.0,
+  });
+  const strip = new THREE.Mesh(stripGeo, stripMat);
+  strip.position.y = 1.05;
+  strip.castShadow = true;
+  group.add(strip);
+
+  // Wheels (cylinders)
+  const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.15, 16);
+  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+  const frontWheel = new THREE.Mesh(wheelGeo, wheelMat);
+  frontWheel.rotation.x = Math.PI / 2;
+  frontWheel.position.set(0, 0.35, -1.0);
+  frontWheel.castShadow = true;
+  group.add(frontWheel);
+  const rearWheel = new THREE.Mesh(wheelGeo, wheelMat);
+  rearWheel.rotation.x = Math.PI / 2;
+  rearWheel.position.set(0, 0.35, 1.0);
+  rearWheel.castShadow = true;
+  group.add(rearWheel);
+
+  // Point light on cycle
+  const glow = new THREE.PointLight(color, 2, 15);
+  glow.position.y = 1.5;
+  group.add(glow);
+
+  return group;
+}
+
+// --- Trail System ---
+class Trail {
+  constructor(color, colorHex) {
+    this.color = color;
+    this.colorHex = colorHex;
+    this.segments = []; // { start: {x,z}, end: {x,z}, mesh }
+    this.currentStart = null;
+    this.currentMesh = null;
+    this.material = new THREE.MeshStandardMaterial({
+      color: color,
+      emissive: color,
+      emissiveIntensity: 0.8,
+      transparent: true,
+      opacity: 0.85,
+    });
+  }
+
+  startNew(x, z) {
+    this.currentStart = { x, z };
+    if (this.currentMesh) {
+      scene.remove(this.currentMesh);
+      this.currentMesh.geometry.dispose();
+    }
+    this.currentMesh = null;
+  }
+
+  update(x, z) {
+    if (!this.currentStart) return;
+    const dx = x - this.currentStart.x;
+    const dz = z - this.currentStart.z;
+    const len = Math.sqrt(dx * dx + dz * dz);
+    if (len < 0.1) return;
+
+    if (this.currentMesh) {
+      scene.remove(this.currentMesh);
+      this.currentMesh.geometry.dispose();
+    }
+
+    const geo = new THREE.BoxGeometry(TRAIL_WIDTH, WALL_HEIGHT, len);
+    this.currentMesh = new THREE.Mesh(geo, this.material);
+    this.currentMesh.position.set(
+      this.currentStart.x + dx / 2,
+      WALL_HEIGHT / 2,
+      this.currentStart.z + dz / 2
+    );
+    this.currentMesh.rotation.y = Math.atan2(dx, dz);
+    this.currentMesh.castShadow = true;
+    this.currentMesh.receiveShadow = true;
+    scene.add(this.currentMesh);
+  }
+
+  finalize(x, z) {
+    if (!this.currentStart) return;
+    const dx = x - this.currentStart.x;
+    const dz = z - this.currentStart.z;
+    const len = Math.sqrt(dx * dx + dz * dz);
+    if (len < TRAIL_SEGMENT_MIN) return;
+
+    if (this.currentMesh) {
+      scene.remove(this.currentMesh);
+      this.currentMesh.geometry.dispose();
+      this.currentMesh = null;
+    }
+
+    const geo = new THREE.BoxGeometry(TRAIL_WIDTH, WALL_HEIGHT, len);
+    const mesh = new THREE.Mesh(geo, this.material);
+    mesh.position.set(
+      this.currentStart.x + dx / 2,
+      WALL_HEIGHT / 2,
+      this.currentStart.z + dz / 2
+    );
+    mesh.rotation.y = Math.atan2(dx, dz);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+
+    this.segments.push({
+      start: { ...this.currentStart },
+      end: { x, z },
+      mesh,
+    });
+  }
+
+  clear() {
+    this.segments.forEach(s => {
+      scene.remove(s.mesh);
+      s.mesh.geometry.dispose();
+    });
+    this.segments = [];
+    if (this.currentMesh) {
+      scene.remove(this.currentMesh);
+      this.currentMesh.geometry.dispose();
+      this.currentMesh = null;
+    }
+    this.currentStart = null;
+  }
+
+  getCollisionSegments(includeCurrent, ownerX, ownerZ) {
+    if (includeCurrent && this.currentStart) {
+      return [...this.segments, { start: { ...this.currentStart }, end: { x: ownerX, z: ownerZ } }];
+    }
+    return this.segments;
+  }
+}
+
+// --- Explosion System ---
+const explosions = [];
+
+const shardGeometries = [
+  new THREE.TetrahedronGeometry(0.4),
+  new THREE.OctahedronGeometry(0.3),
+  new THREE.BoxGeometry(0.5, 0.1, 0.3),
+  new THREE.TetrahedronGeometry(0.25),
+  new THREE.PlaneGeometry(0.5, 0.5),
+];
+
+class Explosion {
+  constructor(x, z, color) {
+    this.shards = [];
+    this.age = 0;
+    this.lifetime = 3.0;
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: color,
+      emissive: color,
+      emissiveIntensity: 1.5,
+      transparent: true,
+      opacity: 1.0,
+      side: THREE.DoubleSide,
+    });
+
+    const count = 25;
+    const waveTypes = ['sawtooth', 'square', 'triangle', 'sine'];
+
+    for (let i = 0; i < count; i++) {
+      const geo = shardGeometries[Math.floor(Math.random() * shardGeometries.length)];
+      const mesh = new THREE.Mesh(geo, mat.clone());
+      mesh.position.set(
+        x + (Math.random() - 0.5) * 1.5,
+        0.5 + Math.random() * 1.0,
+        z + (Math.random() - 0.5) * 1.5
+      );
+      const speed = 3 + Math.random() * 12;
+      const angle = Math.random() * Math.PI * 2;
+      const baseFreq = 100 + Math.random() * 800;
+      const shard = {
+        mesh,
+        vx: Math.cos(angle) * speed,
+        vy: 4 + Math.random() * 10,
+        vz: Math.sin(angle) * speed,
+        spinX: (Math.random() - 0.5) * 15,
+        spinY: (Math.random() - 0.5) * 15,
+        spinZ: (Math.random() - 0.5) * 15,
+        baseFreq,
+        osc: null,
+        gain: null,
+        panner: null,
+      };
+
+      // Spatialized sound per shard
+      if (audioCtx) {
+        const panner = audioCtx.createPanner();
+        panner.panningModel = 'HRTF';
+        panner.distanceModel = 'inverse';
+        panner.refDistance = 5;
+        panner.maxDistance = 150;
+        panner.rolloffFactor = 1.5;
+        panner.setPosition(mesh.position.x, mesh.position.y, mesh.position.z);
+
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0.02;
+
+        const osc = audioCtx.createOscillator();
+        osc.type = waveTypes[Math.floor(Math.random() * waveTypes.length)];
+        osc.frequency.value = baseFreq;
+
+        osc.connect(gain);
+        gain.connect(panner);
+        panner.connect(audioCtx.destination);
+        osc.start();
+
+        shard.osc = osc;
+        shard.gain = gain;
+        shard.panner = panner;
+      }
+
+      scene.add(mesh);
+      this.shards.push(shard);
+    }
+
+    // Flash light
+    this.light = new THREE.PointLight(color, 8, 30);
+    this.light.position.set(x, 3, z);
+    scene.add(this.light);
+  }
+
+  update(dt) {
+    this.age += dt;
+    const fade = Math.max(0, 1 - this.age / this.lifetime);
+
+    this.light.intensity = 8 * fade;
+
+    for (const s of this.shards) {
+      s.vy -= 15 * dt; // gravity
+      s.mesh.position.x += s.vx * dt;
+      s.mesh.position.y += s.vy * dt;
+      s.mesh.position.z += s.vz * dt;
+
+      // Bounce off floor
+      let bounced = false;
+      if (s.mesh.position.y < 0.1) {
+        s.mesh.position.y = 0.1;
+        s.vy = Math.abs(s.vy) * 0.3;
+        s.vx *= 0.7;
+        s.vz *= 0.7;
+        bounced = true;
+      }
+
+      s.mesh.rotation.x += s.spinX * dt;
+      s.mesh.rotation.y += s.spinY * dt;
+      s.mesh.rotation.z += s.spinZ * dt;
+
+      // Slow spin over time
+      s.spinX *= 0.995;
+      s.spinY *= 0.995;
+      s.spinZ *= 0.995;
+
+      s.mesh.material.opacity = fade;
+      s.mesh.material.emissiveIntensity = 1.5 * fade;
+
+      // Update spatialized audio
+      if (s.panner) {
+        s.panner.setPosition(s.mesh.position.x, s.mesh.position.y, s.mesh.position.z);
+
+        // Pitch from spin speed — faster spin = higher pitch
+        const spinMag = Math.sqrt(s.spinX ** 2 + s.spinY ** 2 + s.spinZ ** 2);
+        s.osc.frequency.value = s.baseFreq * (0.3 + spinMag / 15);
+
+        // Volume spike on bounce
+        if (bounced) {
+          const impactVol = Math.min(0.12, Math.abs(s.vy) * 0.01);
+          s.gain.gain.setValueAtTime(impactVol, audioCtx.currentTime);
+        }
+
+        // Fade volume with overall explosion fade
+        s.gain.gain.value = 0.02 * fade;
+      }
+    }
+
+    return this.age < this.lifetime;
+  }
+
+  dispose() {
+    for (const s of this.shards) {
+      scene.remove(s.mesh);
+      s.mesh.geometry.dispose();
+      s.mesh.material.dispose();
+      if (s.osc) {
+        s.osc.stop();
+        s.osc.disconnect();
+        s.gain.disconnect();
+        s.panner.disconnect();
+      }
+    }
+    scene.remove(this.light);
+    this.light.dispose();
+  }
+}
+
+function clearExplosions() {
+  for (const e of explosions) e.dispose();
+  explosions.length = 0;
+}
+
+function spawnExplosion(cycle) {
+  scene.remove(cycle.model);
+  explosions.push(new Explosion(cycle.x, cycle.z, cycle.color));
+}
+
+// --- Player / AI Cycle ---
+class Cycle {
+  constructor(x, z, angle, color, colorHex, isAI = false) {
+    this.x = x;
+    this.z = z;
+    this.angle = angle; // radians, 0 = +Z direction
+    this.speed = 30;
+    this.color = color;
+    this.colorHex = colorHex;
+    this.isAI = isAI;
+    this.alive = true;
+    this.model = createCycleModel(color);
+    this.model.position.set(x, 0, z);
+    this.model.rotation.y = angle;
+    scene.add(this.model);
+    this.trail = new Trail(color, colorHex);
+    this.trail.startNew(x, z);
+    this.turnCooldown = 0;
+    this.aiTimer = 0;
+    this.aiNextTurn = 0;
+  }
+
+  turn(dir) {
+    // dir: -1 = left, 1 = right (instant 90-degree turn)
+    if (this.turnCooldown > 0) return;
+    this.trail.finalize(this.x, this.z);
+    this.angle += dir * Math.PI / 2;
+    // Normalize
+    this.angle = ((this.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    this.trail.startNew(this.x, this.z);
+    this.turnCooldown = 0.15;
+    // Rebuild trail synth chord
+    const synth = this === player ? playerSynth : aiSynth;
+    if (synth) synth.rebuildFromTrail(this.trail);
+  }
+
+  update(dt, allTrails) {
+    if (!this.alive) return;
+
+    this.turnCooldown = Math.max(0, this.turnCooldown - dt);
+
+    if (this.isAI) this.updateAI(dt, allTrails);
+
+    // Move
+    const dx = Math.sin(this.angle) * this.speed * dt;
+    const dz = Math.cos(this.angle) * this.speed * dt;
+    this.x += dx;
+    this.z += dz;
+
+    // Update model
+    this.model.position.set(this.x, 0, this.z);
+    this.model.rotation.y = this.angle;
+
+    // Update trail
+    this.trail.update(this.x, this.z);
+
+    // Check collisions
+    if (this.checkCollision(allTrails)) {
+      this.alive = false;
+      spawnExplosion(this);
+    }
+  }
+
+  checkCollision(allTrails) {
+    // Wall collision
+    if (Math.abs(this.x) > HALF_ARENA - 1 || Math.abs(this.z) > HALF_ARENA - 1) {
+      return true;
+    }
+
+    // Trail collision
+    for (const trail of allTrails) {
+      const isOwnTrail = trail === this.trail;
+      // For other cycles' trails, include their live segment
+      const owner = trail === player.trail ? player : ai;
+      const segs = trail.getCollisionSegments(!isOwnTrail, owner.x, owner.z);
+      for (let i = 0; i < segs.length; i++) {
+        // Skip own last 2 finalized segments (near the cycle after turning)
+        if (isOwnTrail && i >= segs.length - 2) continue;
+        if (this.segmentCollision(segs[i])) return true;
+      }
+    }
+    return false;
+  }
+
+  segmentCollision(seg) {
+    // Line segment vs point (with radius)
+    const radius = 0.8;
+    const ax = seg.start.x, az = seg.start.z;
+    const bx = seg.end.x, bz = seg.end.z;
+
+    // Skip very short segments and the most recent segment of own trail
+    const segLen = Math.sqrt((bx - ax) ** 2 + (bz - az) ** 2);
+    if (segLen < 0.1) return false;
+
+    // Distance from point to line segment
+    const dx = bx - ax, dz = bz - az;
+    let t = ((this.x - ax) * dx + (this.z - az) * dz) / (dx * dx + dz * dz);
+    t = Math.max(0, Math.min(1, t));
+    const nearX = ax + t * dx;
+    const nearZ = az + t * dz;
+    const dist = Math.sqrt((this.x - nearX) ** 2 + (this.z - nearZ) ** 2);
+
+    return dist < radius;
+  }
+
+  updateAI(dt, allTrails) {
+    this.aiTimer += dt;
+
+    // Check urgency — always check if danger is close
+    const urgentDist = this.speed * 0.6;
+    const aheadUrgent = this.isDirectionClear(this.angle, urgentDist, allTrails);
+
+    if (!aheadUrgent) {
+      // Emergency turn NOW
+      this.aiTimer = 0;
+      const leftAngle = this.angle - Math.PI / 2;
+      const rightAngle = this.angle + Math.PI / 2;
+      const leftDist = this.measureClearDistance(leftAngle, allTrails);
+      const rightDist = this.measureClearDistance(rightAngle, allTrails);
+      if (leftDist > rightDist) {
+        this.turn(-1);
+      } else if (rightDist > leftDist) {
+        this.turn(1);
+      } else {
+        this.turn(Math.random() < 0.5 ? -1 : 1);
+      }
+      return;
+    }
+
+    if (this.aiTimer < this.aiNextTurn) return;
+    this.aiTimer = 0;
+    this.aiNextTurn = 0.2 + Math.random() * 0.5;
+
+    // Standard lookahead
+    const lookAhead = this.speed * 2.0;
+    const aheadClear = this.isDirectionClear(this.angle, lookAhead, allTrails);
+    const leftAngle = this.angle - Math.PI / 2;
+    const rightAngle = this.angle + Math.PI / 2;
+
+    if (!aheadClear) {
+      const leftDist = this.measureClearDistance(leftAngle, allTrails);
+      const rightDist = this.measureClearDistance(rightAngle, allTrails);
+      if (leftDist > rightDist) {
+        this.turn(-1);
+      } else if (rightDist > leftDist) {
+        this.turn(1);
+      } else {
+        this.turn(Math.random() < 0.5 ? -1 : 1);
+      }
+    } else {
+      // Occasional random turns to make it interesting
+      if (Math.random() < 0.12) {
+        const leftDist = this.measureClearDistance(leftAngle, allTrails);
+        const rightDist = this.measureClearDistance(rightAngle, allTrails);
+        if (Math.max(leftDist, rightDist) > 20) {
+          this.turn(leftDist > rightDist ? -1 : 1);
+        }
+      }
+    }
+
+    // AI speed variation
+    this.speed = 30 + Math.sin(gameTime * 0.5) * 8;
+  }
+
+  // Returns how far is clear in a given direction
+  measureClearDistance(angle, allTrails) {
+    const maxDist = this.speed * 3.0;
+    const steps = 12;
+    for (let i = 1; i <= steps; i++) {
+      const d = (maxDist / steps) * i;
+      if (!this.isPointClear(this.x + Math.sin(angle) * d, this.z + Math.cos(angle) * d, allTrails)) {
+        return d;
+      }
+    }
+    return maxDist;
+  }
+
+  isPointClear(px, pz, allTrails) {
+    // Wall check
+    if (Math.abs(px) > HALF_ARENA - 3 || Math.abs(pz) > HALF_ARENA - 3) {
+      return false;
+    }
+
+    // Opponent cycle body check
+    const opponent = this === ai ? player : ai;
+    if (opponent.alive) {
+      const oppDist = Math.sqrt((px - opponent.x) ** 2 + (pz - opponent.z) ** 2);
+      if (oppDist < 3.0) return false;
+    }
+
+    // Trail check — include ALL segments including own current live segment
+    for (const trail of allTrails) {
+      const owner = trail === player.trail ? player : ai;
+      // Always include the current live segment for lookahead
+      const segs = trail.getCollisionSegments(true, owner.x, owner.z);
+      const isOwnTrail = trail === this.trail;
+      for (let j = 0; j < segs.length; j++) {
+        // Only skip the last finalized segment of own trail (the one we just turned from)
+        if (isOwnTrail && j === segs.length - 2) continue;
+        // Skip own current live segment endpoint (we're standing there)
+        if (isOwnTrail && j === segs.length - 1) {
+          // This is the live segment — check it but with a smaller radius
+          // so we don't collide with where we currently are
+          const seg = segs[j];
+          const ax = seg.start.x, az = seg.start.z;
+          const bx = seg.end.x, bz = seg.end.z;
+          const segDx = bx - ax, segDz = bz - az;
+          const len2 = segDx * segDx + segDz * segDz;
+          if (len2 < 1.0) continue;
+          let t = ((px - ax) * segDx + (pz - az) * segDz) / len2;
+          t = Math.max(0, Math.min(0.85, t)); // Don't check near the end (where we are)
+          const nearX = ax + t * segDx;
+          const nearZ = az + t * segDz;
+          const dist = Math.sqrt((px - nearX) ** 2 + (pz - nearZ) ** 2);
+          if (dist < 2.0) return false;
+          continue;
+        }
+        const seg = segs[j];
+        const ax = seg.start.x, az = seg.start.z;
+        const bx = seg.end.x, bz = seg.end.z;
+        const segDx = bx - ax, segDz = bz - az;
+        const len2 = segDx * segDx + segDz * segDz;
+        if (len2 < 0.01) continue;
+        let t = ((px - ax) * segDx + (pz - az) * segDz) / len2;
+        t = Math.max(0, Math.min(1, t));
+        const nearX = ax + t * segDx;
+        const nearZ = az + t * segDz;
+        const dist = Math.sqrt((px - nearX) ** 2 + (pz - nearZ) ** 2);
+        if (dist < 2.0) return false;
+      }
+    }
+    return true;
+  }
+
+  isDirectionClear(angle, distance, allTrails) {
+    const steps = 8;
+    for (let i = 1; i <= steps; i++) {
+      const d = (distance / steps) * i;
+      const px = this.x + Math.sin(angle) * d;
+      const pz = this.z + Math.cos(angle) * d;
+      if (!this.isPointClear(px, pz, allTrails)) return false;
+    }
+    return true;
+  }
+
+  reset(x, z, angle) {
+    this.x = x;
+    this.z = z;
+    this.angle = angle;
+    this.speed = 30;
+    this.alive = true;
+    this.model.position.set(x, 0, z);
+    this.model.rotation.y = angle;
+    this.trail.clear();
+    this.trail.startNew(x, z);
+    this.turnCooldown = 0;
+    this.aiTimer = 0;
+  }
+
+  destroy() {
+    scene.remove(this.model);
+    this.trail.clear();
+  }
+}
+
+// --- Game Setup ---
+let player, ai;
+createArena();
+
+function initGame() {
+  if (player) player.destroy();
+  if (ai) ai.destroy();
+  clearExplosions();
+  stopVictorySound();
+  score = 0;
+  gameTime = 0;
+  document.getElementById('score').textContent = 'SCORE: 0';
+
+  player = new Cycle(-40, 60, Math.PI, PLAYER_COLOR, '#00ffff', false);
+  ai = new Cycle(40, -60, Math.PI / 2, AI_COLOR, '#ff6600', true);
+  player.speed = 30;
+}
+
+initGame();
+
+// --- Input ---
+const keys = {};
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (gameState === 'menu') {
+      initAudio();
+      initTrailSynths();
+      playStartSound();
+      gameState = 'playing';
+      document.getElementById('overlay').style.display = 'none';
+    } else if (gameState === 'gameover') {
+      initTrailSynths();
+      playStartSound();
+      gameState = 'playing';
+      document.getElementById('game-over').style.display = 'none';
+      initGame();
+    }
+  }
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// --- Minimap ---
+const minimapCanvas = document.getElementById('minimap');
+const minimapCtx = minimapCanvas.getContext('2d');
+
+function drawMinimap() {
+  const w = minimapCanvas.width;
+  const h = minimapCanvas.height;
+  minimapCtx.fillStyle = 'rgba(0, 5, 8, 0.9)';
+  minimapCtx.fillRect(0, 0, w, h);
+
+  const scale = w / ARENA_SIZE;
+
+  function toMap(x, z) {
+    return [(x + HALF_ARENA) * scale, (z + HALF_ARENA) * scale];
+  }
+
+  // Draw trails
+  function drawTrail(trail, color) {
+    minimapCtx.strokeStyle = color;
+    minimapCtx.lineWidth = 2;
+    for (const seg of trail.segments) {
+      const [x1, y1] = toMap(seg.start.x, seg.start.z);
+      const [x2, y2] = toMap(seg.end.x, seg.end.z);
+      minimapCtx.beginPath();
+      minimapCtx.moveTo(x1, y1);
+      minimapCtx.lineTo(x2, y2);
+      minimapCtx.stroke();
+    }
+    // Current segment
+    if (trail.currentStart) {
+      const owner = trail === player.trail ? player : ai;
+      const [x1, y1] = toMap(trail.currentStart.x, trail.currentStart.z);
+      const [x2, y2] = toMap(owner.x, owner.z);
+      minimapCtx.beginPath();
+      minimapCtx.moveTo(x1, y1);
+      minimapCtx.lineTo(x2, y2);
+      minimapCtx.stroke();
+    }
+  }
+
+  drawTrail(player.trail, '#00ffff');
+  drawTrail(ai.trail, '#ff6600');
+
+  // Draw cycles
+  function drawDot(cycle, color) {
+    const [mx, my] = toMap(cycle.x, cycle.z);
+    minimapCtx.fillStyle = color;
+    minimapCtx.beginPath();
+    minimapCtx.arc(mx, my, 4, 0, Math.PI * 2);
+    minimapCtx.fill();
+    minimapCtx.fillStyle = '#fff';
+    minimapCtx.beginPath();
+    minimapCtx.arc(mx, my, 2, 0, Math.PI * 2);
+    minimapCtx.fill();
+  }
+
+  drawDot(player, '#00ffff');
+  drawDot(ai, '#ff6600');
+
+  // Border
+  minimapCtx.strokeStyle = '#003333';
+  minimapCtx.lineWidth = 1;
+  minimapCtx.strokeRect(0, 0, w, h);
+}
+
+// --- Game Loop ---
+const clock = new THREE.Clock();
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (gameState === 'playing') {
+    gameTime += dt;
+    score = Math.floor(gameTime * 10);
+    document.getElementById('score').textContent = 'SCORE: ' + score;
+
+    // Player input
+    if ((keys['KeyA'] || keys['ArrowLeft']) && player.turnCooldown <= 0) {
+      player.turn(1);
+      playTurnSound(playerSynth, 1);
+      keys['KeyA'] = false;
+      keys['ArrowLeft'] = false;
+    }
+    if ((keys['KeyD'] || keys['ArrowRight']) && player.turnCooldown <= 0) {
+      player.turn(-1);
+      playTurnSound(playerSynth, -1);
+      keys['KeyD'] = false;
+      keys['ArrowRight'] = false;
+    }
+
+    // Speed control
+    if (keys['KeyW'] || keys['ArrowUp']) {
+      player.speed = Math.min(MAX_SPEED, player.speed + 30 * dt);
+    }
+    if (keys['KeyS'] || keys['ArrowDown']) {
+      player.speed = Math.max(MIN_SPEED, player.speed - 30 * dt);
+    }
+
+    // Speed bar
+    const speedPct = ((player.speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED)) * 100;
+    document.getElementById('speed-bar').style.width = speedPct + '%';
+
+    // Update trail synths
+    if (playerSynth) playerSynth.update(player);
+    if (aiSynth) aiSynth.update(ai);
+
+    const allTrails = [player.trail, ai.trail];
+    player.update(dt, allTrails);
+    ai.update(dt, allTrails);
+
+    // Check game over
+    if (!player.alive || !ai.alive) {
+      gameState = 'exploding';
+      gameOverTimer = 1.5;
+      gameOverScore = score;
+      // Play explosion seeded with crashed cycle's chord
+      if (!player.alive) playExplosionSound(playerSynth);
+      if (!ai.alive) playExplosionSound(aiSynth);
+      // Bypass 3D on both synths so they're heard directly, then fade out
+      if (playerSynth) { playerSynth.bypass3D(); if (playerSynth.masterGain) playerSynth.masterGain.gain.value = 0.15; }
+      if (aiSynth) { aiSynth.bypass3D(); if (aiSynth.masterGain) aiSynth.masterGain.gain.value = 0.15; }
+      synthFadeTimer = SYNTH_FADE_DURATION;
+    }
+  }
+
+  // Fade trail synths during exploding and gameover
+  if (gameState === 'exploding' || gameState === 'gameover') {
+    synthFadeTimer = Math.max(0, synthFadeTimer - dt);
+    const fadeFactor = synthFadeTimer / SYNTH_FADE_DURATION;
+    if (playerSynth && playerSynth.masterGain) {
+      playerSynth.masterGain.gain.value = 0.15 * fadeFactor;
+    }
+    if (aiSynth && aiSynth.masterGain) {
+      aiSynth.masterGain.gain.value = 0.15 * fadeFactor;
+    }
+    if (synthFadeTimer <= 0) {
+      stopTrailSynths();
+    }
+  }
+
+  if (gameState === 'exploding') {
+    gameOverTimer -= dt;
+    if (gameOverTimer <= 0) {
+      gameState = 'gameover';
+      const goDiv = document.getElementById('game-over');
+      const resultText = document.getElementById('result-text');
+      const resultDetail = document.getElementById('result-detail');
+
+      if (!player.alive && !ai.alive) {
+        resultText.textContent = 'DRAW';
+        resultText.style.color = '#888';
+        resultText.style.textShadow = '0 0 30px #888';
+        resultDetail.textContent = 'Both cycles derezzed! Score: ' + gameOverScore;
+      } else if (!player.alive) {
+        resultText.textContent = 'DEREZZED';
+        resultText.style.color = '#ff0044';
+        resultText.style.textShadow = '0 0 30px #ff0044';
+        resultDetail.textContent = 'You crashed! Score: ' + gameOverScore;
+      } else {
+        resultText.textContent = 'VICTORY';
+        resultText.style.color = '#00ffcc';
+        resultText.style.textShadow = '0 0 30px #00ffcc';
+        resultDetail.textContent = 'Opponent derezzed! Score: ' + gameOverScore;
+        playVictorySound();
+      }
+      goDiv.style.display = 'flex';
+    }
+  }
+
+  // Update explosions
+  for (let i = explosions.length - 1; i >= 0; i--) {
+    if (!explosions[i].update(dt)) {
+      explosions[i].dispose();
+      explosions.splice(i, 1);
+    }
+  }
+
+  // Camera: first person behind and above player cycle
+  const camDist = 6;
+  const camHeight = 3.5;
+  const camLookAhead = 15;
+  const behindX = player.x - Math.sin(player.angle) * camDist;
+  const behindZ = player.z - Math.cos(player.angle) * camDist;
+  const lookX = player.x + Math.sin(player.angle) * camLookAhead;
+  const lookZ = player.z + Math.cos(player.angle) * camLookAhead;
+
+  camera.position.lerp(new THREE.Vector3(behindX, camHeight, behindZ), 0.15);
+  camera.lookAt(lookX, 1.5, lookZ);
+
+  updateAudioListener();
+  drawMinimap();
+  renderer.render(scene, camera);
+}
+
+animate();
+
+// --- Resize ---
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>

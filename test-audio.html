@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Trail Synth Tests</title>
+<style>
+  body { background: #111; color: #0ff; font-family: monospace; padding: 20px; }
+  .pass { color: #0f0; }
+  .fail { color: #f00; }
+  #log { white-space: pre-wrap; line-height: 1.6; }
+  button { background: #003; color: #0ff; border: 1px solid #0ff; padding: 8px 16px;
+           font-family: monospace; cursor: pointer; margin: 5px; }
+</style>
+</head>
+<body>
+<h2>Trail Synth Crash Tests</h2>
+<p>Click "Run Tests" to start (requires user gesture for AudioContext).</p>
+<button onclick="runTests()">Run Tests</button>
+<button onclick="runAudibleTest()">Audible Test: AI crashes, player synth continues</button>
+<div id="log"></div>
+
+<script>
+const log = document.getElementById('log');
+let testsPassed = 0;
+let testsFailed = 0;
+
+function assert(condition, msg) {
+  if (condition) {
+    log.innerHTML += `<span class="pass">  PASS: ${msg}</span>\n`;
+    testsPassed++;
+  } else {
+    log.innerHTML += `<span class="fail">  FAIL: ${msg}</span>\n`;
+    testsFailed++;
+  }
+}
+
+// Float-tolerant comparison for Web Audio's 32-bit float values
+function approx(a, b, eps = 0.001) {
+  return Math.abs(a - b) < eps;
+}
+
+function logSection(title) {
+  log.innerHTML += `\n<b>--- ${title} ---</b>\n`;
+}
+
+// Minimal stubs matching the game's structure
+const MIN_SPEED = 20;
+const MAX_SPEED = 60;
+const PENTATONIC = [1, 9/8, 5/4, 3/2, 5/3];
+
+let audioCtx = null;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+class TrailSynth {
+  constructor(baseNote, isPlayer) {
+    this.baseNote = baseNote;
+    this.isPlayer = isPlayer;
+    this.voices = [];
+    this.masterGain = null;
+    this.filter = null;
+    this.panner = null;
+    this.maxVoices = 6;
+    this.alive = true;
+  }
+
+  init() {
+    if (!audioCtx) return;
+    this.filter = audioCtx.createBiquadFilter();
+    this.filter.type = 'lowpass';
+    this.filter.frequency.value = 400;
+    this.filter.Q.value = 4;
+
+    this.masterGain = audioCtx.createGain();
+    this.masterGain.gain.value = 0;
+
+    if (!this.isPlayer) {
+      this.panner = audioCtx.createPanner();
+      this.panner.panningModel = 'HRTF';
+      this.panner.distanceModel = 'inverse';
+      this.panner.refDistance = 10;
+      this.panner.maxDistance = 200;
+      this.panner.rolloffFactor = 1;
+      this.filter.connect(this.masterGain);
+      this.masterGain.connect(this.panner);
+      this.panner.connect(audioCtx.destination);
+    } else {
+      this.filter.connect(this.masterGain);
+      this.masterGain.connect(audioCtx.destination);
+    }
+  }
+
+  rebuildFromTrail(trail) {
+    if (!audioCtx || !this.masterGain) return;
+    for (const v of this.voices) {
+      v.osc.stop();
+      v.osc.disconnect();
+      v.gain.disconnect();
+    }
+    this.voices = [];
+
+    const segs = trail.segments;
+    if (segs.length === 0) {
+      this._addVoice(this.baseNote, 'sawtooth', 1.0);
+      return;
+    }
+
+    const recent = segs.slice(-this.maxVoices);
+    const waveforms = ['sawtooth', 'triangle', 'square', 'sine'];
+    recent.forEach((seg, i) => {
+      const dx = seg.end.x - seg.start.x;
+      const dz = seg.end.z - seg.start.z;
+      const len = Math.sqrt(dx * dx + dz * dz);
+      const normLen = Math.min(len, 100) / 100;
+      const octave = 1 + Math.floor((1 - normLen) * 3);
+      const degree = Math.floor(normLen * 37) % PENTATONIC.length;
+      const freq = this.baseNote * PENTATONIC[degree] * octave;
+      const wave = waveforms[i % waveforms.length];
+      const vol = 0.4 + (i / recent.length) * 0.6;
+      this._addVoice(freq, wave, vol);
+    });
+  }
+
+  _addVoice(freq, wave, vol) {
+    const osc = audioCtx.createOscillator();
+    osc.type = wave;
+    osc.frequency.value = freq;
+    osc.detune.value = (Math.random() - 0.5) * 15;
+    const gain = audioCtx.createGain();
+    gain.gain.value = vol;
+    osc.connect(gain);
+    gain.connect(this.filter);
+    osc.start();
+    this.voices.push({ osc, gain, baseVol: vol });
+  }
+
+  update(cycle) {
+    if (!audioCtx || !this.masterGain) return;
+
+    if (!cycle.alive) {
+      this.masterGain.gain.value *= 0.9;
+      return;
+    }
+
+    const trail = cycle.trail;
+    let curLen = 0;
+    if (trail.currentStart) {
+      const dx = cycle.x - trail.currentStart.x;
+      const dz = cycle.z - trail.currentStart.z;
+      curLen = Math.sqrt(dx * dx + dz * dz);
+    }
+    const lenFactor = Math.min(curLen, 80) / 80;
+    this.filter.frequency.value = 200 + lenFactor * 800;
+
+    const speedT = (cycle.speed - MIN_SPEED) / (MAX_SPEED - MIN_SPEED);
+    this.filter.Q.value = 2 + speedT * 8;
+
+    const baseVol = this.isPlayer ? 0.06 : 0.08;
+    this.masterGain.gain.value = baseVol + speedT * 0.03;
+
+    if (this.panner) {
+      this.panner.setPosition(cycle.x, 1, cycle.z);
+    }
+  }
+
+  stop() {
+    if (this.masterGain) this.masterGain.gain.value = 0;
+  }
+
+  dispose() {
+    for (const v of this.voices) {
+      v.osc.stop();
+      v.osc.disconnect();
+      v.gain.disconnect();
+    }
+    this.voices = [];
+    if (this.masterGain) this.masterGain.disconnect();
+    if (this.filter) this.filter.disconnect();
+    if (this.panner) this.panner.disconnect();
+    this.masterGain = null;
+    this.filter = null;
+    this.panner = null;
+  }
+}
+
+// Stub cycle/trail for testing
+function makeCycle(alive, speed) {
+  return {
+    alive,
+    speed: speed || 30,
+    x: 0, z: 0,
+    trail: {
+      segments: [
+        { start: { x: 0, z: 0 }, end: { x: 20, z: 0 } },
+        { start: { x: 20, z: 0 }, end: { x: 20, z: 15 } },
+        { start: { x: 20, z: 15 }, end: { x: 5, z: 15 } },
+      ],
+      currentStart: { x: 5, z: 15 },
+    },
+  };
+}
+
+function runTests() {
+  log.innerHTML = '';
+  testsPassed = 0;
+  testsFailed = 0;
+  initAudio();
+
+  // ========================================
+  logSection('Test 1: TrailSynth initializes with gain 0');
+  {
+    const synth = new TrailSynth(65, true);
+    synth.init();
+    assert(synth.masterGain !== null, 'masterGain created');
+    assert(synth.masterGain.gain.value === 0, `initial gain is 0 (got ${synth.masterGain.gain.value})`);
+    synth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 2: rebuildFromTrail creates voices from segments');
+  {
+    const synth = new TrailSynth(65, true);
+    synth.init();
+    const cycle = makeCycle(true);
+    synth.rebuildFromTrail(cycle.trail);
+    assert(synth.voices.length === 3, `3 voices created (got ${synth.voices.length})`);
+    for (let i = 0; i < synth.voices.length; i++) {
+      assert(synth.voices[i].osc.frequency.value > 0, `voice ${i} has frequency > 0`);
+    }
+    synth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 3: update() sets gain > 0 when cycle is alive');
+  {
+    const synth = new TrailSynth(65, true);
+    synth.init();
+    const cycle = makeCycle(true, 30);
+    synth.rebuildFromTrail(cycle.trail);
+    synth.update(cycle);
+    assert(synth.masterGain.gain.value > 0, `gain > 0 when alive (got ${synth.masterGain.gain.value})`);
+    const gainAfterUpdate = synth.masterGain.gain.value;
+    synth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 4: update() fades gain when cycle is dead');
+  {
+    const synth = new TrailSynth(65, true);
+    synth.init();
+    const aliveCycle = makeCycle(true, 30);
+    synth.rebuildFromTrail(aliveCycle.trail);
+    synth.update(aliveCycle);
+    const gainBefore = synth.masterGain.gain.value;
+
+    const deadCycle = makeCycle(false, 30);
+    synth.update(deadCycle);
+    const gainAfter = synth.masterGain.gain.value;
+    assert(gainAfter < gainBefore, `gain decreased (${gainBefore} -> ${gainAfter})`);
+    assert(approx(gainAfter, gainBefore * 0.9), `gain *= 0.9 (expected ${gainBefore * 0.9}, got ${gainAfter})`);
+    synth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 5: stop() sets gain to 0');
+  {
+    const synth = new TrailSynth(65, true);
+    synth.init();
+    const cycle = makeCycle(true, 30);
+    synth.rebuildFromTrail(cycle.trail);
+    synth.update(cycle);
+    assert(synth.masterGain.gain.value > 0, 'gain > 0 before stop');
+    synth.stop();
+    assert(synth.masterGain.gain.value === 0, `gain is 0 after stop (got ${synth.masterGain.gain.value})`);
+    synth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 6: Simulate AI crash - player synth should remain audible');
+  {
+    const pSynth = new TrailSynth(65, true);
+    const aSynth = new TrailSynth(55, false);
+    pSynth.init();
+    aSynth.init();
+
+    const playerCycle = makeCycle(true, 35);
+    const aiCycle = makeCycle(true, 30);
+    pSynth.rebuildFromTrail(playerCycle.trail);
+    aSynth.rebuildFromTrail(aiCycle.trail);
+
+    // Normal update - both alive
+    pSynth.update(playerCycle);
+    aSynth.update(aiCycle);
+    const pGainBefore = pSynth.masterGain.gain.value;
+    const aGainBefore = aSynth.masterGain.gain.value;
+    assert(pGainBefore > 0, `player gain > 0 before crash (${pGainBefore})`);
+    assert(aGainBefore > 0, `AI gain > 0 before crash (${aGainBefore})`);
+
+    // AI crashes
+    aiCycle.alive = false;
+
+    // --- Simulate crash frame from game loop ---
+    // This is what the game does:
+    // 1. playExplosionSound(aiSynth) - reads voices (we skip actual sound here)
+    // 2. aiSynth.stop()
+    aSynth.stop();
+    assert(aSynth.masterGain.gain.value === 0, `AI gain is 0 after stop (${aSynth.masterGain.gain.value})`);
+
+    // 3. Enter 'exploding' block on SAME frame
+    // Player is alive, so update player synth
+    pSynth.update(playerCycle);
+    assert(pSynth.masterGain.gain.value > 0, `player gain > 0 after AI crash update (${pSynth.masterGain.gain.value})`);
+
+    // 4. Boost to 0.15
+    pSynth.masterGain.gain.value = 0.15;
+    assert(approx(pSynth.masterGain.gain.value, 0.15), `player gain boosted to 0.15 (got ${pSynth.masterGain.gain.value})`);
+
+    // 5. Next frame - still exploding
+    pSynth.update(playerCycle);
+    pSynth.masterGain.gain.value = 0.15;
+    assert(approx(pSynth.masterGain.gain.value, 0.15), `player gain still 0.15 on next frame (got ${pSynth.masterGain.gain.value})`);
+    assert(pSynth.voices.length > 0, `player still has ${pSynth.voices.length} voices`);
+
+    // Verify voices are actually connected and running
+    let allVoicesActive = true;
+    for (const v of pSynth.voices) {
+      if (v.gain.gain.value <= 0) allVoicesActive = false;
+    }
+    assert(allVoicesActive, 'all player voices have gain > 0');
+
+    // Check filter is not at 0
+    assert(pSynth.filter.frequency.value > 0, `player filter freq > 0 (${pSynth.filter.frequency.value})`);
+
+    pSynth.dispose();
+    aSynth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 7: Simulate player crash - AI synth should remain audible');
+  {
+    const pSynth = new TrailSynth(65, true);
+    const aSynth = new TrailSynth(55, false);
+    pSynth.init();
+    aSynth.init();
+
+    const playerCycle = makeCycle(true, 35);
+    const aiCycle = makeCycle(true, 30);
+    pSynth.rebuildFromTrail(playerCycle.trail);
+    aSynth.rebuildFromTrail(aiCycle.trail);
+    pSynth.update(playerCycle);
+    aSynth.update(aiCycle);
+
+    // Player crashes
+    playerCycle.alive = false;
+    pSynth.stop();
+
+    assert(pSynth.masterGain.gain.value === 0, 'player synth stopped');
+
+    // Exploding block: AI survives
+    aSynth.update(aiCycle);
+    aSynth.masterGain.gain.value = 0.15;
+    assert(approx(aSynth.masterGain.gain.value, 0.15), `AI gain boosted to 0.15 (got ${aSynth.masterGain.gain.value})`);
+    assert(aSynth.voices.length > 0, `AI still has ${aSynth.voices.length} voices`);
+
+    pSynth.dispose();
+    aSynth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 8: Verify the exact game loop crash-frame sequence');
+  {
+    // Replicate exact game loop logic
+    const pSynth = new TrailSynth(65, true);
+    const aSynth = new TrailSynth(55, false);
+    pSynth.init();
+    aSynth.init();
+
+    const playerCycle = makeCycle(true, 35);
+    const aiCycle = makeCycle(true, 30);
+    pSynth.rebuildFromTrail(playerCycle.trail);
+    aSynth.rebuildFromTrail(aiCycle.trail);
+
+    let gameState = 'playing';
+    let gameOverTimer = 0;
+
+    // --- Frame where AI crashes ---
+    // Step 1: in 'playing' block, update synths
+    pSynth.update(playerCycle);
+    aSynth.update(aiCycle);
+    log.innerHTML += `  After playing update: pGain=${pSynth.masterGain.gain.value.toFixed(4)}, aGain=${aSynth.masterGain.gain.value.toFixed(4)}\n`;
+
+    // Step 2: cycle.update sets AI to dead
+    aiCycle.alive = false;
+
+    // Step 3: game over check
+    if (!playerCycle.alive || !aiCycle.alive) {
+      gameState = 'exploding';
+      gameOverTimer = 1.5;
+      if (!playerCycle.alive) { pSynth.stop(); }
+      if (!aiCycle.alive) { aSynth.stop(); }
+    }
+
+    log.innerHTML += `  After crash trigger: pGain=${pSynth.masterGain.gain.value.toFixed(4)}, aGain=${aSynth.masterGain.gain.value.toFixed(4)}\n`;
+
+    // Step 4: exploding block (same frame)
+    if (gameState === 'exploding') {
+      if (playerCycle.alive && pSynth) {
+        pSynth.update(playerCycle);
+        if (pSynth.masterGain) pSynth.masterGain.gain.value = 0.15;
+      }
+      if (aiCycle.alive && aSynth) {
+        aSynth.update(aiCycle);
+        if (aSynth.masterGain) aSynth.masterGain.gain.value = 0.15;
+      }
+    }
+
+    log.innerHTML += `  After exploding block: pGain=${pSynth.masterGain.gain.value.toFixed(4)}, aGain=${aSynth.masterGain.gain.value.toFixed(4)}\n`;
+
+    assert(approx(pSynth.masterGain.gain.value, 0.15), `player synth at 0.15 (got ${pSynth.masterGain.gain.value})`);
+    assert(aSynth.masterGain.gain.value === 0, `AI synth at 0 (got ${aSynth.masterGain.gain.value})`);
+
+    // --- Next frame ---
+    if (gameState === 'exploding') {
+      if (playerCycle.alive && pSynth) {
+        pSynth.update(playerCycle);
+        if (pSynth.masterGain) pSynth.masterGain.gain.value = 0.15;
+      }
+      if (aiCycle.alive && aSynth) {
+        aSynth.update(aiCycle);
+        if (aSynth.masterGain) aSynth.masterGain.gain.value = 0.15;
+      }
+    }
+
+    log.innerHTML += `  After frame 2: pGain=${pSynth.masterGain.gain.value.toFixed(4)}, aGain=${aSynth.masterGain.gain.value.toFixed(4)}\n`;
+    assert(approx(pSynth.masterGain.gain.value, 0.15), `player synth still 0.15 on frame 2 (got ${pSynth.masterGain.gain.value})`);
+
+    pSynth.dispose();
+    aSynth.dispose();
+  }
+
+  // ========================================
+  logSection('Test 9: Verify oscillators are not stopped/disconnected for surviving synth');
+  {
+    const pSynth = new TrailSynth(65, true);
+    pSynth.init();
+    const cycle = makeCycle(true, 30);
+    pSynth.rebuildFromTrail(cycle.trail);
+
+    const oscCount = pSynth.voices.length;
+    assert(oscCount > 0, `has voices: ${oscCount}`);
+
+    // Simulate many frames of exploding
+    for (let i = 0; i < 100; i++) {
+      pSynth.update(cycle);
+      pSynth.masterGain.gain.value = 0.15;
+    }
+
+    assert(pSynth.voices.length === oscCount, `still has ${pSynth.voices.length} voices after 100 frames`);
+    assert(approx(pSynth.masterGain.gain.value, 0.15), `gain still 0.15 after 100 frames (got ${pSynth.masterGain.gain.value})`);
+    assert(pSynth.filter !== null, 'filter still exists');
+
+    pSynth.dispose();
+  }
+
+  // ========================================
+  log.innerHTML += `\n<b>=== Results: ${testsPassed} passed, ${testsFailed} failed ===</b>\n`;
+}
+
+// Audible test - actually plays sound to verify
+function runAudibleTest() {
+  log.innerHTML = '';
+  initAudio();
+
+  const pSynth = new TrailSynth(65, true);
+  const aSynth = new TrailSynth(55, false);
+  pSynth.init();
+  aSynth.init();
+
+  const playerCycle = makeCycle(true, 35);
+  const aiCycle = makeCycle(true, 30);
+  pSynth.rebuildFromTrail(playerCycle.trail);
+  aSynth.rebuildFromTrail(aiCycle.trail);
+
+  // Start both playing
+  pSynth.update(playerCycle);
+  aSynth.update(aiCycle);
+
+  log.innerHTML += 'Both synths playing for 2 seconds...\n';
+
+  setTimeout(() => {
+    log.innerHTML += 'AI crashes! Stopping AI synth...\n';
+    aiCycle.alive = false;
+    aSynth.stop();
+
+    // Boost player
+    pSynth.masterGain.gain.value = 0.15;
+
+    log.innerHTML += `Player synth gain: ${pSynth.masterGain.gain.value}\n`;
+    log.innerHTML += `AI synth gain: ${aSynth.masterGain.gain.value}\n`;
+    log.innerHTML += 'Player synth should still be audible for 3 more seconds...\n';
+
+    // Keep updating player synth like the game loop does
+    const interval = setInterval(() => {
+      pSynth.update(playerCycle);
+      pSynth.masterGain.gain.value = 0.15;
+    }, 16);
+
+    setTimeout(() => {
+      clearInterval(interval);
+      log.innerHTML += `Final player gain: ${pSynth.masterGain.gain.value}\n`;
+      log.innerHTML += 'Stopping player synth now.\n';
+      pSynth.stop();
+      setTimeout(() => {
+        pSynth.dispose();
+        aSynth.dispose();
+        log.innerHTML += 'Done. Did you hear the player synth continue after the AI stopped?\n';
+      }, 200);
+    }, 3000);
+  }, 2000);
+}
+</script>
+</body>
+</html>
