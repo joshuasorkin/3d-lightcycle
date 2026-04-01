@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRON Lightcycle</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; }
+  canvas { display: block; }
+  #hud {
+    position: absolute; top: 20px; left: 20px;
+    color: #0ff; font-size: 18px; text-shadow: 0 0 10px #0ff;
+  }
+  #overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.85); color: #0ff; z-index: 10;
+  }
+  #overlay h1 {
+    font-size: 72px; text-shadow: 0 0 30px #0ff, 0 0 60px #0ff;
+    margin-bottom: 20px; letter-spacing: 15px;
+  }
+  #overlay p { font-size: 20px; margin: 8px 0; color: #8ff; }
+  #overlay .start-hint {
+    margin-top: 30px; font-size: 24px; color: #fff;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+  #game-over {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.85); z-index: 10;
+  }
+  #game-over h1 { font-size: 60px; margin-bottom: 20px; letter-spacing: 10px; }
+  #game-over p { font-size: 22px; color: #8ff; margin: 8px 0; }
+  #game-over .start-hint {
+    margin-top: 30px; font-size: 24px; color: #fff;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  #minimap {
+    position: absolute; bottom: 20px; right: 20px;
+    border: 1px solid #0ff; box-shadow: 0 0 10px #0ff;
+  }
+  #speed-bar-container {
+    position: absolute; bottom: 20px; left: 20px;
+    width: 200px; height: 12px; border: 1px solid #0ff;
+    box-shadow: 0 0 8px #0ff;
+  }
+  #speed-bar {
+    height: 100%; width: 50%; background: #0ff;
+    box-shadow: 0 0 10px #0ff; transition: width 0.1s;
+  }
+  #speed-label {
+    position: absolute; bottom: 36px; left: 20px;
+    color: #0ff; font-size: 14px; text-shadow: 0 0 8px #0ff;
+    font-family: 'Courier New', monospace;
+  }
+  /* Lobby styles */
+  #lobby {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.95); color: #0ff; z-index: 20;
+    gap: 20px;
+  }
+  #lobby h1 {
+    font-size: 72px; text-shadow: 0 0 30px #0ff, 0 0 60px #0ff;
+    margin-bottom: 10px; letter-spacing: 15px;
+  }
+  #lobby .menu-section { text-align: center; margin: 10px 0; }
+  #lobby input {
+    background: #001a1a; border: 1px solid #0ff; color: #0ff;
+    font-family: 'Courier New', monospace; font-size: 24px;
+    padding: 8px 16px; text-align: center; text-transform: uppercase;
+    letter-spacing: 8px; width: 180px; outline: none;
+  }
+  #lobby input::placeholder { color: #066; letter-spacing: 4px; font-size: 16px; }
+  #lobby input:focus { box-shadow: 0 0 15px #0ff; }
+  #lobby button {
+    background: transparent; border: 1px solid #0ff; color: #0ff;
+    font-family: 'Courier New', monospace; font-size: 18px;
+    padding: 10px 30px; cursor: pointer; text-transform: uppercase;
+    letter-spacing: 4px; transition: all 0.2s;
+  }
+  #lobby button:hover { background: #0ff; color: #000; box-shadow: 0 0 20px #0ff; }
+  #lobby .or-divider { color: #066; font-size: 16px; margin: 5px 0; }
+  /* Room lobby */
+  #room-lobby {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.95); color: #0ff; z-index: 20;
+    gap: 15px;
+  }
+  #room-lobby h2 { font-size: 28px; letter-spacing: 6px; text-shadow: 0 0 15px #0ff; }
+  #room-code-display {
+    font-size: 48px; letter-spacing: 12px; color: #fff;
+    text-shadow: 0 0 20px #0ff; cursor: pointer;
+  }
+  #room-code-display:hover::after {
+    content: ' (click to copy)'; font-size: 14px; color: #066; letter-spacing: 2px;
+  }
+  #player-list { list-style: none; padding: 0; min-width: 250px; }
+  #player-list li {
+    padding: 8px 16px; margin: 4px 0; font-size: 18px; letter-spacing: 3px;
+    border-left: 3px solid;
+  }
+  #player-list .empty-slot { color: #333; border-color: #333; font-style: italic; }
+  #start-game-btn {
+    background: transparent; border: 1px solid #0ff; color: #0ff;
+    font-family: 'Courier New', monospace; font-size: 20px;
+    padding: 12px 40px; cursor: pointer; text-transform: uppercase;
+    letter-spacing: 4px; transition: all 0.2s; margin-top: 10px;
+  }
+  #start-game-btn:hover { background: #0ff; color: #000; box-shadow: 0 0 20px #0ff; }
+  #start-game-btn:disabled { opacity: 0.3; cursor: default; }
+  #start-game-btn:disabled:hover { background: transparent; color: #0ff; box-shadow: none; }
+  #countdown-display {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.7); z-index: 25;
+    font-size: 120px; color: #0ff; text-shadow: 0 0 40px #0ff;
+  }
+</style>
+</head>
+<body>
+
+<div id="lobby">
+  <h1>LIGHTCYCLE</h1>
+  <div class="menu-section">
+    <button id="create-btn">Create Game</button>
+  </div>
+  <div class="or-divider">- OR -</div>
+  <div class="menu-section">
+    <input id="room-input" type="text" maxlength="4" placeholder="CODE">
+    <br><br>
+    <button id="join-btn">Join Game</button>
+  </div>
+</div>
+
+<div id="room-lobby">
+  <h2>ROOM CODE</h2>
+  <div id="room-code-display"></div>
+  <h2>PLAYERS</h2>
+  <ul id="player-list"></ul>
+  <button id="start-game-btn">Start Game</button>
+</div>
+
+<div id="countdown-display"></div>
+
+<div id="overlay" style="display:none">
+  <h1>LIGHTCYCLE</h1>
+  <p>A / D or Arrow Keys to turn</p>
+  <p>W / S or Up / Down to change speed</p>
+  <p>Leave a trail of light. Don't crash.</p>
+  <p class="start-hint">Press SPACE to start</p>
+</div>
+
+<div id="game-over">
+  <h1 id="result-text">DEREZZED</h1>
+  <p id="result-detail"></p>
+  <p class="start-hint">Press SPACE to restart</p>
+</div>
+
+<div id="hud" style="display:none">
+  <div id="score">SCORE: 0</div>
+</div>
+
+<canvas id="minimap" width="180" height="180" style="display:none"></canvas>
+<div id="speed-label" style="display:none">SPEED</div>
+<div id="speed-bar-container" style="display:none"><div id="speed-bar"></div></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+  }
+}
+</script>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>
