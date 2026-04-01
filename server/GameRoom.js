@@ -104,20 +104,33 @@ export class GameRoom {
     this.startCountdown();
   }
 
+  addAI() {
+    if (this.state !== 'waiting') return;
+    const usedSlots = new Set(this.players.map(p => p.slot));
+    let slot = 0;
+    while (usedSlots.has(slot)) slot++;
+    if (slot >= this.maxPlayers) return;
+
+    const id = nextPlayerId++;
+    this.players.push({ id, ws: null, name: 'AI', slot, isAI: true });
+    this.broadcast({ type: 'player_joined', players: this.getPlayerList() });
+  }
+
+  removeAI() {
+    if (this.state !== 'waiting') return;
+    const aiIdx = this.players.findLastIndex(p => p.isAI);
+    if (aiIdx === -1) return;
+    this.players.splice(aiIdx, 1);
+    this.broadcast({ type: 'player_left', players: this.getPlayerList() });
+  }
+
   startCountdown() {
+    if (this.players.length < 2) return; // need at least 2 players/AI
+
     this.state = 'countdown';
     let seconds = 3;
 
-    // Fill empty slots with AI
-    for (let slot = 0; slot < this.maxPlayers; slot++) {
-      if (!this.players.find(p => p.slot === slot)) {
-        const id = nextPlayerId++;
-        this.players.push({ id, ws: null, name: 'AI', slot, isAI: true });
-      }
-    }
-
     this.broadcast({ type: 'countdown', seconds });
-    this.broadcast({ type: 'player_joined', players: this.getPlayerList() });
 
     this.countdownTimer = setInterval(() => {
       seconds--;

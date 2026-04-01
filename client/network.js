@@ -53,6 +53,14 @@ export function sendReady() {
   send({ type: C2S.READY });
 }
 
+export function sendAddAI() {
+  send({ type: C2S.ADD_AI });
+}
+
+export function sendRemoveAI() {
+  send({ type: C2S.REMOVE_AI });
+}
+
 export function sendTurn(dir, tick) {
   send({ type: C2S.TURN, dir, tick });
 }

@@ -10,9 +10,9 @@ document.body.prepend(renderer.domElement);
 
 export const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x000508);
-scene.fog = new THREE.Fog(0x000508, 50, 250);
+scene.fog = new THREE.Fog(0x000508, 200, 1000);
 
-export const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 500);
+export const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
 
 // Lighting
 const ambientLight = new THREE.AmbientLight(0x111122, 0.5);

@@ -1,4 +1,4 @@
-export const ARENA_SIZE = 300;
+export const ARENA_SIZE = 1200;
 export const HALF_ARENA = ARENA_SIZE / 2;
 export const WALL_HEIGHT = 4;
 export const TRAIL_WIDTH = 0.6;
@@ -18,10 +18,10 @@ export const PLAYER_COLORS = [
 export const GRID_COLOR = 0x003333;
 
 export const SPAWN_POSITIONS = [
-  { x: -60, z: 60, angle: 0 },
-  { x: 60, z: -60, angle: Math.PI },
-  { x: -60, z: -60, angle: Math.PI / 2 },
-  { x: 60, z: 60, angle: -Math.PI / 2 },
+  { x: -240, z: 240, angle: 0 },
+  { x: 240, z: -240, angle: Math.PI },
+  { x: -240, z: -240, angle: Math.PI / 2 },
+  { x: 240, z: 240, angle: -Math.PI / 2 },
 ];
 
 export const SERVER_TICK_RATE = 20;

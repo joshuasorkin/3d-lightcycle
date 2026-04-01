@@ -83,6 +83,16 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'add_ai': {
+        if (ws._room && ws._playerId === ws._room.hostId) ws._room.addAI();
+        break;
+      }
+
+      case 'remove_ai': {
+        if (ws._room && ws._playerId === ws._room.hostId) ws._room.removeAI();
+        break;
+      }
+
       case 'turn': {
         if (ws._room) ws._room.onTurn(ws, msg.dir, msg.tick);
         break;

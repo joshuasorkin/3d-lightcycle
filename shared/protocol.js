@@ -5,6 +5,8 @@ export const C2S = {
   READY: 'ready',
   TURN: 'turn',
   SPEED: 'speed',
+  ADD_AI: 'add_ai',
+  REMOVE_AI: 'remove_ai',
   LEAVE: 'leave',
 };
 

@@ -9,7 +9,7 @@ import {
   playVictorySound, stopVictorySound,
 } from './audio.js';
 import { drawMinimap } from './Minimap.js';
-import { connect, createRoom, joinRoom, sendReady, sendTurn, sendSpeed } from './network.js';
+import { connect, createRoom, joinRoom, sendReady, sendAddAI, sendRemoveAI, sendTurn, sendSpeed } from './network.js';
 
 setThreeRef(THREE);
 
@@ -102,6 +102,14 @@ document.getElementById('start-game-btn').addEventListener('click', () => {
   sendReady();
 });
 
+document.getElementById('add-ai-btn').addEventListener('click', () => {
+  sendAddAI();
+});
+
+document.getElementById('remove-ai-btn').addEventListener('click', () => {
+  sendRemoveAI();
+});
+
 // --- Network message handler ---
 function onServerMessage(msg) {
   switch (msg.type) {
@@ -110,6 +118,7 @@ function onServerMessage(msg) {
       isHost = msg.isHost;
       document.getElementById('room-code-display').textContent = msg.roomCode;
       document.getElementById('start-game-btn').style.display = isHost ? 'block' : 'none';
+      document.getElementById('ai-controls').style.display = isHost ? 'flex' : 'none';
       updatePlayerList(msg.players);
       gameState = 'room';
       showScreen('room');
