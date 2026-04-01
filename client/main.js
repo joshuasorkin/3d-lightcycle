@@ -262,12 +262,55 @@ function handleCycleDied(msg) {
   scene.remove(cycle.model);
   explosions.push(new Explosion(cycle.x, cycle.z, cycle.colorInt));
   playExplosionSound(cycle.synth);
+
+  // If the local player just died, transition to exploding immediately
+  if (msg.playerId === localPlayerId && gameState === 'playing') {
+    gameState = 'exploding';
+    gameOverTimer = 1.5;
+    gameOverScore = score;
+  }
+}
+
+function showLocalGameOver() {
+  if (gameState === 'gameover') return;
+  gameState = 'gameover';
+  gameOverScore = score;
+
+  const resultText = document.getElementById('result-text');
+  const resultDetail = document.getElementById('result-detail');
+
+  const localCycle = cycles.find(c => c.id === localPlayerId);
+  const localAlive = localCycle && localCycle.alive;
+
+  if (!localAlive) {
+    resultText.textContent = 'DEREZZED';
+    resultText.style.color = '#ff0044';
+    resultText.style.textShadow = '0 0 30px #ff0044';
+    resultDetail.textContent = 'You crashed! Score: ' + gameOverScore;
+  } else {
+    resultText.textContent = 'VICTORY';
+    resultText.style.color = '#00ffcc';
+    resultText.style.textShadow = '0 0 30px #00ffcc';
+    resultDetail.textContent = 'Score: ' + gameOverScore;
+    playVictorySound(localCycle, localCycle.synth);
+  }
+
+  // Fade synths
+  synthFadeTimer = SYNTH_FADE_DURATION;
+  for (const c of cycles) {
+    if (c.synth) {
+      c.synth.bypass3D();
+      if (c.synth.masterGain) c.synth.masterGain.gain.value = 0.15;
+    }
+  }
+
+  showScreen('gameover');
 }
 
 function handleGameOver(msg) {
-  gameState = 'gameover';
-  gameOverScore = score;
-  const goDiv = document.getElementById('game-over');
+  // Server confirmed game over — update the screen if not already showing
+  gameOverScore = msg.score || score;
+
   const resultText = document.getElementById('result-text');
   const resultDetail = document.getElementById('result-detail');
 
@@ -290,18 +333,22 @@ function handleGameOver(msg) {
     resultText.style.color = '#00ffcc';
     resultText.style.textShadow = '0 0 30px #00ffcc';
     resultDetail.textContent = 'Score: ' + gameOverScore;
-    playVictorySound(localCycle, localCycle.synth);
-  }
-
-  // Fade synths
-  synthFadeTimer = SYNTH_FADE_DURATION;
-  for (const c of cycles) {
-    if (c.synth) {
-      c.synth.bypass3D();
-      if (c.synth.masterGain) c.synth.masterGain.gain.value = 0.15;
+    if (gameState !== 'gameover') {
+      playVictorySound(localCycle, localCycle.synth);
     }
   }
 
+  if (gameState !== 'gameover') {
+    synthFadeTimer = SYNTH_FADE_DURATION;
+    for (const c of cycles) {
+      if (c.synth) {
+        c.synth.bypass3D();
+        if (c.synth.masterGain) c.synth.masterGain.gain.value = 0.15;
+      }
+    }
+  }
+
+  gameState = 'gameover';
   showScreen('gameover');
 }
 
@@ -395,7 +442,8 @@ function animate() {
   if (gameState === 'exploding') {
     gameOverTimer -= dt;
     if (gameOverTimer <= 0) {
-      // Wait for server GAME_OVER message if not received yet
+      // Show game-over screen now (server game_over may arrive later and update it)
+      showLocalGameOver();
     }
   }
 
